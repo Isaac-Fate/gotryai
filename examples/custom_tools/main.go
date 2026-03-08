@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
-	"time"
+	"strconv"
 
 	"github.com/joho/godotenv"
 	"github.com/smallnest/langgraphgo/prebuilt"
@@ -25,7 +26,9 @@ func main() {
 		panic(err)
 	}
 
-	runnable, err := prebuilt.CreateAgentMap(llm, []tools.Tool{&GetCurrentDateTimeTool{}}, 10)
+	inputTools := []tools.Tool{&RollDiceTool{}}
+
+	runnable, err := prebuilt.CreateAgentMap(llm, inputTools, 10)
 	if err != nil {
 		panic(err)
 	}
@@ -34,7 +37,10 @@ func main() {
 
 	initialState := map[string]any{
 		"messages": []llms.MessageContent{
-			llms.TextParts(llms.ChatMessageTypeHuman, "What is the current date and time?"),
+			llms.TextParts(
+				llms.ChatMessageTypeHuman,
+				"Roll a dice for 3 times and tell me the result.",
+			),
 		},
 	}
 
@@ -46,16 +52,16 @@ func main() {
 	fmt.Println(resp)
 }
 
-type GetCurrentDateTimeTool struct{}
+type RollDiceTool struct{}
 
-func (t *GetCurrentDateTimeTool) Name() string {
-	return "get_current_date_time"
+func (t *RollDiceTool) Name() string {
+	return "roll_dice"
 }
 
-func (t *GetCurrentDateTimeTool) Description() string {
-	return "Get the current date and time"
+func (t *RollDiceTool) Description() string {
+	return "Roll a 6-sided dice and return the result."
 }
 
-func (t *GetCurrentDateTimeTool) Call(ctx context.Context, input string) (string, error) {
-	return time.Now().Format(time.RFC3339), nil
+func (t *RollDiceTool) Call(ctx context.Context, input string) (string, error) {
+	return strconv.Itoa(rand.Intn(6) + 1), nil
 }
