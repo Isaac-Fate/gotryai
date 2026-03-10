@@ -1,3 +1,11 @@
+// Package main demonstrates the Listenable StateGraph pattern in LangGraphGo.
+//
+// The listenable approach decouples node processing logic from result handling:
+// nodes focus on transforming state, while listeners observe events and react
+// (e.g., logging, reporting, metrics). This separation makes it easy to add
+// monitoring, debugging, or domain-specific handlers without modifying nodes.
+//
+// Run: go run . (requires DEEPSEEK_API_KEY in .env)
 package main
 
 import (
@@ -17,6 +25,7 @@ import (
 func main() {
 	godotenv.Load()
 
+	// --- 1. Setup: LLMs and sample input ---
 	email := `
 From: sarah@company.com
 To: john@company.com
@@ -34,7 +43,7 @@ Best regards,
 Sarah
 `
 
-	llm, err := openai.New(
+	llm, err := openai.New( // For free-form text (summary)
 		openai.WithBaseURL("https://api.deepseek.com"),
 		openai.WithToken(os.Getenv("DEEPSEEK_API_KEY")),
 		openai.WithModel("deepseek-chat"),
@@ -43,7 +52,7 @@ Sarah
 		panic(err)
 	}
 
-	llmStructured, err := openai.New(
+	llmStructured, err := openai.New( // For JSON output (todo extraction)
 		openai.WithBaseURL("https://api.deepseek.com"),
 		openai.WithToken(os.Getenv("DEEPSEEK_API_KEY")),
 		openai.WithModel("deepseek-chat"),
@@ -53,18 +62,8 @@ Sarah
 		panic(err)
 	}
 
-	// Create a graph
+	// --- 2. Build the graph: nodes and edges ---
 	g := graph.NewListenableStateGraph[MyState]()
-
-	// Event listeners
-
-	type EventLogger struct{}
-
-	func (e *EventLogger) OnNodeEvent(ctx context.Context, event graph.NodeEvent, nodeName string, state MyState, err error) {
-		
-	}
-
-	// Nodes
 
 	g.AddNode(
 		"summarize_email",
@@ -103,8 +102,8 @@ Sarah
 		},
 	)
 
-	g.AddNode(
-		"extract_todo_items",
+	extractTodoItemsNode := g.AddNode(
+		"extract_todo_items", // Depends on summary from previous node
 		"Extract todo items from the summary",
 		func(ctx context.Context, state MyState) (MyState, error) {
 			// Prompt template
@@ -162,73 +161,118 @@ Sarah
 		},
 	)
 
-	// Edges
 	g.AddEdge("summarize_email", "extract_todo_items")
 	g.AddEdge("extract_todo_items", graph.END)
-
-	// Entry point
 	g.SetEntryPoint("summarize_email")
 
-	ctx := context.Background()
+	// --- 3. Attach listeners (must be after AddNode) ---
+	g.AddGlobalListener(&EventLogger{})                   // Logs all node events and state
+	extractTodoItemsNode.AddListener(&TodoItemReporter{}) // Node-specific: only extract_todo_items
 
-	initialState := MyState{}
-
+	// --- 4. Compile and run ---
 	runnable, err := g.CompileListenable()
 	if err != nil {
 		panic(err)
 	}
 
-	events := runnable.Stream(ctx, initialState)
-	for event := range events {
-		printEvent(event)
+	ctx := context.Background()
+	initialState := MyState{}
+
+	// Chain events (EventChainStart, EventChainEnd) are stream-only—NodeListeners
+	// never receive them. We log chain boundaries manually when using Invoke().
+	fmt.Printf("[%s] 🚀 Chain started\n", time.Now().Format("15:04:05.000"))
+	result, err := runnable.Invoke(ctx, initialState)
+	fmt.Printf("[%s] 🏁 Chain ended\n", time.Now().Format("15:04:05.000"))
+	if err != nil {
+		panic(err)
 	}
 
-}
-
-func printEvent(event graph.StreamEvent[MyState]) {
-	ts := event.Timestamp.Format("15:04:05.000")
-
-	printState := func() {
-		if len(event.State) == 0 {
-			return
-		}
-		stateJSON, _ := json.MarshalIndent(event.State, "  ", "  ")
-		fmt.Printf("  state:\n%s\n", stateJSON)
-	}
-
-	switch event.Event {
-	case graph.EventChainStart:
-		fmt.Printf("[%s] 🚀 Chain started\n", ts)
-	case graph.EventChainEnd:
-		fmt.Printf("[%s] 🏁 Chain ended\n", ts)
-		printState()
-	case graph.NodeEventStart:
-		fmt.Printf("[%s] ▶️  Node '%s' started\n", ts, event.NodeName)
-		printState()
-	case graph.NodeEventComplete:
-		dur := ""
-		if event.Duration > 0 {
-			dur = fmt.Sprintf(" (%v)", event.Duration.Round(time.Millisecond))
-		}
-		fmt.Printf("[%s] ✅ Node '%s' completed%s\n", ts, event.NodeName, dur)
-		printState()
-	case graph.NodeEventError:
-		fmt.Printf("[%s] ❌ Node '%s' failed: %v\n", ts, event.NodeName, event.Error)
-		printState()
-	default:
-		fmt.Printf("[%s] %s: %s\n", ts, event.Event, event.NodeName)
-		printState()
+	if len(result) > 0 {
+		stateJSON, _ := json.MarshalIndent(result, "  ", "  ")
+		fmt.Printf("\n  final state:\n%s\n", stateJSON)
 	}
 }
 
+// --- Types ---
+
+// MyState is the graph state; keys: "summary" (string), "todo_items" ([]TodoItem).
 type MyState map[string]any
 
 type TodoItem struct {
 	Title       string     `json:"title"`
 	Description string     `json:"description,omitempty"`
-	DueDate     *time.Time `json:"due_date,omitempty"    jsonschema:"description=The date and time the todo item is due"`
+	DueDate     *time.Time `json:"due_date,omitempty"    jsonschema:"description=Due date for the todo item"`
 }
 
 type TodoItemExtractionResult struct {
 	TodoItems []TodoItem `json:"todo_items"`
+}
+
+// --- Listeners ---
+
+// EventLogger logs every node event (start, complete, error) and prints state.
+// Receives: NodeEventStart, NodeEventComplete, NodeEventError. Does NOT receive
+// EventChainStart/EventChainEnd—those are emitted only to Stream()'s channel.
+type EventLogger struct{}
+
+func (l *EventLogger) OnNodeEvent(
+	ctx context.Context, event graph.NodeEvent, nodeName string, state MyState, err error,
+) {
+	ts := time.Now().Format("15:04:05.000")
+
+	printState := func() {
+		if len(state) == 0 {
+			return
+		}
+		stateJSON, _ := json.MarshalIndent(state, "  ", "  ")
+		fmt.Printf("  state:\n%s\n", stateJSON)
+	}
+
+	switch event {
+	case graph.NodeEventStart:
+		fmt.Printf("[%s] ▶️  Node '%s' started\n", ts, nodeName)
+		printState()
+	case graph.NodeEventComplete:
+		fmt.Printf("[%s] ✅ Node '%s' completed\n", ts, nodeName)
+		printState()
+	case graph.NodeEventError:
+		fmt.Printf("[%s] ❌ Node '%s' failed: %v\n", ts, nodeName, err)
+		printState()
+	default:
+		fmt.Printf("[%s] %s: %s\n", ts, event, nodeName)
+		printState()
+	}
+}
+
+// TodoItemReporter pretty-prints extracted todo items. Attach via node.AddListener()
+// so it only receives events from that node—no need to filter by nodeName.
+//
+// In this demo it only prints; in practice, the same pattern would persist to a DB,
+// send an email, create calendar events, invoke external services, or trigger other downstream actions.
+type TodoItemReporter struct{}
+
+func (r *TodoItemReporter) OnNodeEvent(
+	ctx context.Context, event graph.NodeEvent, nodeName string, state MyState, err error,
+) {
+	if event != graph.NodeEventComplete {
+		return
+	}
+	v, ok := state["todo_items"]
+	if !ok || v == nil {
+		return
+	}
+	items, ok := v.([]TodoItem)
+	if !ok {
+		return
+	}
+	fmt.Println("\n  📋 Todo items:")
+	for i, item := range items {
+		fmt.Printf("    %d. %s\n", i+1, item.Title)
+		if item.Description != "" {
+			fmt.Printf("       %s\n", item.Description)
+		}
+		if item.DueDate != nil {
+			fmt.Printf("       due: %s\n", item.DueDate.Format("2006-01-02"))
+		}
+	}
 }
