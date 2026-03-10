@@ -54,7 +54,15 @@ Sarah
 	}
 
 	// Create a graph
-	g := graph.NewStreamingStateGraph[MyState]()
+	g := graph.NewListenableStateGraph[MyState]()
+
+	// Event listeners
+
+	type EventLogger struct{}
+
+	func (e *EventLogger) OnNodeEvent(ctx context.Context, event graph.NodeEvent, nodeName string, state MyState, err error) {
+		
+	}
 
 	// Nodes
 
