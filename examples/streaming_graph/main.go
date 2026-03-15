@@ -1,3 +1,9 @@
+// This example demonstrates streaming graph execution.
+//
+// CompileListenable() returns a runnable that supports Stream(). Each event
+// (chain start/end, node start/complete/error) is emitted as it happens.
+//
+// Run: go run . (requires DEEPSEEK_API_KEY in .env)
 package main
 
 import (
@@ -14,9 +20,12 @@ import (
 	"github.com/tmc/langchaingo/prompts"
 )
 
+// --- Main ---
+
 func main() {
 	godotenv.Load()
 
+	// --- 1. Setup: LLMs and sample input ---
 	email := `
 From: sarah@company.com
 To: john@company.com
@@ -53,16 +62,12 @@ Sarah
 		panic(err)
 	}
 
-	// Create a graph
 	g := graph.NewStreamingStateGraph[MyState]()
-
-	// Nodes
 
 	g.AddNode(
 		"summarize_email",
 		"Summarize the email",
 		func(ctx context.Context, state MyState) (MyState, error) {
-			// Prompt template
 			promptTemplate := prompts.NewPromptTemplate(`
 			You are a helpful assistant that summarizes emails.
 
@@ -74,7 +79,6 @@ Sarah
 				[]string{"email"},
 			)
 
-			// Create the prompt
 			prompt, err := promptTemplate.Format(map[string]any{
 				"email": email,
 			})
@@ -82,13 +86,11 @@ Sarah
 				panic(err)
 			}
 
-			// Call the LLM
 			resp, err := llm.Call(ctx, prompt)
 			if err != nil {
 				panic(err)
 			}
 
-			// Update the state
 			state["summary"] = resp
 
 			return state, nil
@@ -99,7 +101,6 @@ Sarah
 		"extract_todo_items",
 		"Extract todo items from the summary",
 		func(ctx context.Context, state MyState) (MyState, error) {
-			// Prompt template
 			promptTemplate := prompts.NewPromptTemplate(`
 			You are a helpful assistant that extracts todo items from a summary.
 			If the title of the todo item is clear enough, you don't need to add a description.
@@ -124,7 +125,6 @@ Sarah
 
 			schemaString := string(schemaBytes)
 
-			// Create the prompt
 			prompt, err := promptTemplate.Format(map[string]any{
 				"date_time": time.Now().Format(time.RFC3339),
 				"summary":   state["summary"],
@@ -134,36 +134,36 @@ Sarah
 				panic(err)
 			}
 
-			// Call the LLM
 			resp, err := llmStructured.Call(ctx, prompt)
 			if err != nil {
 				panic(err)
 			}
 
-			// Parse the response
 			result := TodoItemExtractionResult{}
 			err = json.Unmarshal([]byte(resp), &result)
 			if err != nil {
 				panic(err)
 			}
 
-			// Update the state
 			state["todo_items"] = result.TodoItems
 
 			return state, nil
 		},
 	)
 
-	// Edges
 	g.AddEdge("summarize_email", "extract_todo_items")
 	g.AddEdge("extract_todo_items", graph.END)
-
-	// Entry point
 	g.SetEntryPoint("summarize_email")
 
 	ctx := context.Background()
 
-	initialState := MyState{}
+	initialState := MyState{	}
+
+	// --- 2. Build the graph: nodes and edges ---
+	// (nodes and edges defined above)
+
+	// --- 3. Stream events ---
+	fmt.Println()
 
 	runnable, err := g.CompileListenable()
 	if err != nil {
@@ -177,6 +177,7 @@ Sarah
 
 }
 
+// printEvent handles each stream event and prints node state.
 func printEvent(event graph.StreamEvent[MyState]) {
 	ts := event.Timestamp.Format("15:04:05.000")
 
@@ -184,7 +185,7 @@ func printEvent(event graph.StreamEvent[MyState]) {
 		if len(event.State) == 0 {
 			return
 		}
-		stateJSON, _ := json.MarshalIndent(event.State, "  ", "  ")
+		stateJSON, _ := json.MarshalIndent(event.State, "    ", "  ")
 		fmt.Printf("  state:\n%s\n", stateJSON)
 	}
 
@@ -213,14 +214,19 @@ func printEvent(event graph.StreamEvent[MyState]) {
 	}
 }
 
+// --- Types ---
+
+// MyState is the graph state; keys: "summary" (string), "todo_items" ([]TodoItem).
 type MyState map[string]any
 
+// TodoItem represents a single todo item extracted from the summary.
 type TodoItem struct {
 	Title       string     `json:"title"`
 	Description string     `json:"description,omitempty"`
 	DueDate     *time.Time `json:"due_date,omitempty"    jsonschema:"description=The date and time the todo item is due"`
 }
 
+// TodoItemExtractionResult is the JSON shape returned by the extract_todo_items node.
 type TodoItemExtractionResult struct {
 	TodoItems []TodoItem `json:"todo_items"`
 }

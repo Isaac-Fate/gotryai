@@ -22,6 +22,8 @@ import (
 	"github.com/tmc/langchaingo/prompts"
 )
 
+// --- Main ---
+
 func main() {
 	godotenv.Load()
 
@@ -69,19 +71,17 @@ Sarah
 		"summarize_email",
 		"Summarize the email",
 		func(ctx context.Context, state MyState) (MyState, error) {
-			// Prompt template
 			promptTemplate := prompts.NewPromptTemplate(`
 			You are a helpful assistant that summarizes emails.
 
 			The email is:
 			{{.email}}
 
-			Your summary is (only return the summary, no other text):
+			Your summary is:
 			`,
 				[]string{"email"},
 			)
 
-			// Create the prompt
 			prompt, err := promptTemplate.Format(map[string]any{
 				"email": email,
 			})
@@ -89,13 +89,11 @@ Sarah
 				panic(err)
 			}
 
-			// Call the LLM
 			resp, err := llm.Call(ctx, prompt)
 			if err != nil {
 				panic(err)
 			}
 
-			// Update the state
 			state["summary"] = resp
 
 			return state, nil
@@ -106,7 +104,6 @@ Sarah
 		"extract_todo_items", // Depends on summary from previous node
 		"Extract todo items from the summary",
 		func(ctx context.Context, state MyState) (MyState, error) {
-			// Prompt template
 			promptTemplate := prompts.NewPromptTemplate(`
 			You are a helpful assistant that extracts todo items from a summary.
 			If the title of the todo item is clear enough, you don't need to add a description.
@@ -131,7 +128,6 @@ Sarah
 
 			schemaString := string(schemaBytes)
 
-			// Create the prompt
 			prompt, err := promptTemplate.Format(map[string]any{
 				"date_time": time.Now().Format(time.RFC3339),
 				"summary":   state["summary"],
@@ -141,20 +137,17 @@ Sarah
 				panic(err)
 			}
 
-			// Call the LLM
 			resp, err := llmStructured.Call(ctx, prompt)
 			if err != nil {
 				panic(err)
 			}
 
-			// Parse the response
 			result := TodoItemExtractionResult{}
 			err = json.Unmarshal([]byte(resp), &result)
 			if err != nil {
 				panic(err)
 			}
 
-			// Update the state
 			state["todo_items"] = result.TodoItems
 
 			return state, nil
@@ -180,6 +173,7 @@ Sarah
 
 	// Chain events (EventChainStart, EventChainEnd) are stream-only—NodeListeners
 	// never receive them. We log chain boundaries manually when using Invoke().
+	fmt.Println()
 	fmt.Printf("[%s] 🚀 Chain started\n", time.Now().Format("15:04:05.000"))
 	result, err := runnable.Invoke(ctx, initialState)
 	fmt.Printf("[%s] 🏁 Chain ended\n", time.Now().Format("15:04:05.000"))
@@ -189,7 +183,12 @@ Sarah
 
 	if len(result) > 0 {
 		stateJSON, _ := json.MarshalIndent(result, "  ", "  ")
-		fmt.Printf("\n  final state:\n%s\n", stateJSON)
+		fmt.Println()
+		fmt.Println("┌─────────────────────────────────────────────────────────────")
+		fmt.Println("│ Final state")
+		fmt.Println("└─────────────────────────────────────────────────────────────")
+		fmt.Println(string(stateJSON))
+		fmt.Println()
 	}
 }
 
@@ -224,8 +223,8 @@ func (l *EventLogger) OnNodeEvent(
 		if len(state) == 0 {
 			return
 		}
-		stateJSON, _ := json.MarshalIndent(state, "  ", "  ")
-		fmt.Printf("  state:\n%s\n", stateJSON)
+		stateJSON, _ := json.MarshalIndent(state, "    ", "  ")
+		fmt.Printf("    state:\n%s\n", stateJSON)
 	}
 
 	switch event {
