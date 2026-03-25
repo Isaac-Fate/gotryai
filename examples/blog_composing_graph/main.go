@@ -28,7 +28,7 @@ Audience / prerequisites: Readers who already have OpenClaw installed and runnin
 locally on their machine — this post is not a from-zero OpenClaw setup guide.
 
 Goal: Configure things so OpenClaw itself can operate the browser and interact with
-Google Gemini’s normal web UI (the live page), instead of only talking to APIs or a
+Google Gemini's normal web UI (the live page), instead of only talking to APIs or a
 disconnected headless stack.
 
 How to get there (must mention): You can install the relevant capability from Claw
@@ -186,9 +186,9 @@ Return JSON matching this schema:
 {{.schema}}
 `, []string{"draft", "literature", "schema"})
 			prompt, err := pt.Format(map[string]any{
-				"draft":     state.Draft,
+				"draft":      state.Draft,
 				"literature": truncateRunes(state.LiteratureReview, 12000),
-				"schema":    string(schemaBytes),
+				"schema":     string(schemaBytes),
 			})
 			if err != nil {
 				return state, err
@@ -225,7 +225,7 @@ You shape the TOP of a technical blog for readers who may only skim.
 Use ONLY the material below (draft + literature excerpt + outline). Do not invent facts.
 Leave not_for_or_risks empty and common_pitfalls empty unless clearly supported.
 
-snapshot_h2 MUST be exactly one of: 要点速览, 读前快照, 核心结论, 先说重点 (pick the best fit).
+snapshot_h2 MUST be exactly one of: At a glance, Read this first, Bottom line, What matters (pick the best fit).
 
 must_know_bullets: 3–5 items; each one line; factual or actionable; no rhetorical questions.
 one_line_verdict: one concrete sentence — the article's main claim or recommendation.
@@ -270,11 +270,11 @@ Return JSON only, matching this schema:
 Write ONLY markdown for the top of a technical blog (skim-first). No preamble.
 
 Rules:
-- First line: ## then exactly one of 要点速览, 读前快照, 核心结论, 先说重点.
+- First line: ## then exactly one of: At a glance, Read this first, Bottom line, What matters.
 - Next: one short paragraph — the single most important verdict (concrete, no cliché openers).
 - Then: a bullet list of 3–5 must-know points.
 - Optional: one line on who this is NOT for, only if grounded in the text; otherwise omit.
-Do not use filler such as "在当今时代" or "综上所述". Do not label bullets "TL;DR".
+Do not use filler such as "In today's rapidly changing world" or "In conclusion," as empty throat-clearing. Do not label bullets "TL;DR".
 
 Rough draft:
 {{.draft}}
@@ -451,13 +451,13 @@ URLs in prose where relevant (inline [text](url)); never invent links:
 {{.evidence}}
 
 Structure and voice:
-- Start the body with EXACTLY ONE opening sentence (no label prefix like "Takeaway:", "小结：", "结论：").
+- Start the body with EXACTLY ONE opening sentence (no label prefix like "Takeaway:", "Summary:", "Conclusion:").
   That sentence must stand alone as this section's verdict if the reader reads nothing else.
   Across sections in one article, VARY how you open: sometimes a blunt claim, sometimes a short contrast,
   sometimes a concrete scenario — do not reuse the same rhythm every time.
 - Then 1–3 more short paragraphs: support, steps, nuance. Prefer short sentences, concrete nouns, and
   light lists where they reduce cognitive load.
-- Avoid filler and stock phrases ("在当今时代", "值得注意的是", "综上所述", "不可或缺", or vague hype).
+- Avoid filler and stock phrases ("in today's world", "it is worth noting", "in conclusion," "indispensable", or vague hype).
 - Use the heading once as ## line; stay appropriate for audience: {{.audience}}.
 - Cite helpful resources in the prose (not only at the end) when evidence bullets provide URLs.
 
@@ -702,14 +702,14 @@ type ReaderSnapshotJSON struct {
 }
 
 func normalizeSnapshotH2(s string) string {
-	allowed := []string{"要点速览", "读前快照", "核心结论", "先说重点"}
+	allowed := []string{"At a glance", "Read this first", "Bottom line", "What matters"}
 	s = strings.TrimSpace(s)
 	for _, a := range allowed {
 		if s == a {
 			return s
 		}
 	}
-	return "要点速览"
+	return "At a glance"
 }
 
 func snapshotToMarkdown(j ReaderSnapshotJSON) string {
