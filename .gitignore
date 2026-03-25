@@ -69,3 +69,6 @@ testdata/
 
 # Backup files
 /bak
+
+# Output files
+/out 

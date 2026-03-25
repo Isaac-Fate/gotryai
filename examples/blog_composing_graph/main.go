@@ -9,10 +9,11 @@ import (
 	"strings"
 	"time"
 
+	mytool "gotryai/pkg/tool"
+
 	"github.com/invopop/jsonschema"
 	"github.com/joho/godotenv"
 	"github.com/smallnest/langgraphgo/graph"
-	"github.com/smallnest/langgraphgo/tool"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/prompts"
 )
@@ -21,33 +22,24 @@ func main() {
 	godotenv.Load()
 
 	// Sample draft input — replace or wire to stdin/flag in a real app.
+	// 	draft := `
+	// Title idea: Let openclaw drive the Gemini web UI in your browser
+
+	// Rough notes: Technical walkthrough for readers who has installed openclaw on their machine
+	// and wants let openclaw to take over the browser and interact with the Gemini web UI;
+	// need to install skill: gemini-browser from clawhub, prepfer one-liner install, just send message "help me install the skill gemini-browser from clawhub" in the openclaw console, and install the openclaw browser replay extension in chrome https://chromewebstore.google.com/detail/openclaw-browser-relay/nglingapjinhecnfejdcpihlpneeadjp?pli=1, then configure something
+	// `
+
 	draft := `
-Title idea: Let OpenClaw drive the Gemini web UI in your browser
+Title idea: try langgraphgo
 
-Audience / prerequisites: Readers who already have OpenClaw installed and running
-locally on their machine — this post is not a from-zero OpenClaw setup guide.
-
-Goal: Configure things so OpenClaw itself can operate the browser and interact with
-Google Gemini's normal web UI (the live page), instead of only talking to APIs or a
-disconnected headless stack.
-
-How to get there (must mention): You can install the relevant capability from Claw
-Hub — specifically the Gemini browser skill pack at
-https://clawhub.ai/eccstartup/gemini-browser — and wire it into your OpenClaw setup.
-
-Rough notes to cover: What changes once the skill is installed (tools, prompts, or
-browser session expectations), how to sanity-check that Gemini in the tab is what
-OpenClaw is steering, and practical pitfalls (Google account / session in the browser,
-extensions, rate limits, keeping the right Chrome profile or window in the loop).
-
-Tone: hands-on engineering; accurate names and URLs — use web search when versions
-or UI labels are uncertain.
+Rough notes: it is this pacakge smallnest/langgraphgo; basic examples of making an AI agent app, invoke agent, structured output, workflow graph, agent, etc.
 `
 
-	bochaSearch, err := tool.NewBochaSearch(
-		"",
-		tool.WithBochaCount(8),
-		tool.WithBochaSummary(true),
+	// Web search backend is pluggable; prompts refer to "web search" only so swapping
+	// providers (e.g. Brave) does not require prompt edits.
+	webSearch, err := mytool.NewDuckDuckGoSearch(
+		mytool.WithDuckCount(8),
 	)
 	if err != nil {
 		panic(err)
@@ -74,18 +66,33 @@ or UI labels are uncertain.
 
 	g := graph.NewListenableStateGraph[BlogComposingGraphState]()
 
-	g.AddNode("literature_review", "Broad Bocha search + synthesized overview and key resources",
+	g.AddNode("author_brief", "Extract binding goals, out-of-scope, and must-include from the draft only",
 		func(ctx context.Context, state BlogComposingGraphState) (BlogComposingGraphState, error) {
-			qSchema := jsonschema.Reflect(&SearchQueriesJSON{})
-			qSchemaBytes, err := json.MarshalIndent(qSchema, "", "  ")
+			abSchema := jsonschema.Reflect(&AuthorBriefJSON{})
+			abSchemaBytes, err := json.MarshalIndent(abSchema, "", "  ")
 			if err != nil {
 				return state, err
 			}
-			qPt := prompts.NewPromptTemplate(`
-The author will write a technical blog post. Plan 3–4 web search queries that give a
-wide overview of the topic (official docs, GitHub, announcements, comparisons, setup guides).
-Queries should complement each other, not repeat the same phrasing. Base this only on the
-rough draft below.
+			abPt := prompts.NewPromptTemplate(`
+Extract a structured AUTHOR BRIEF from the ROUGH DRAFT only. Do not use outside knowledge
+or assumptions beyond what is written.
+
+This brief is binding for all later steps: they must not add popular tangents that contradict
+the draft (infer tangents only from what the draft explicitly rules out or from a clear mismatch
+between in_scope and typical “helpful” filler).
+
+Fields:
+- primary_goal: one sentence capturing what success means for the reader.
+- in_scope: bullet strings — what the finished post IS about (be specific; use the draft’s terms).
+- out_of_scope: bullet strings — main narratives, article shapes, or whole chapters the author is NOT asking for.
+  Derive these from the draft: if the author centers workflow A, list “making workflow B the spine of the post”
+  here when the draft did not ask for B. Quote or paraphrase the draft; do not invent product names not in the draft.
+- must_include: concrete demands from the draft only — exact commands or messages to copy (quote verbatim),
+  exact URLs, version pins, file paths, or UI steps the draft names.
+- do_not_emphasize: topics web search often over-weights that the draft did not center on; keep each item tied
+  to draft evidence or to obvious conflict with in_scope.
+
+If the draft states a preferred command, message, or one-liner, you MUST copy that exact string into must_include.
 
 Rough draft:
 {{.draft}}
@@ -93,9 +100,55 @@ Rough draft:
 Return JSON only, matching this schema:
 {{.schema}}
 `, []string{"draft", "schema"})
-			qPrompt, err := qPt.Format(map[string]any{
+			abPrompt, err := abPt.Format(map[string]any{
 				"draft":  state.Draft,
-				"schema": string(qSchemaBytes),
+				"schema": string(abSchemaBytes),
+			})
+			if err != nil {
+				return state, err
+			}
+			abResp, err := llmStructured.Call(ctx, abPrompt)
+			if err != nil {
+				return state, err
+			}
+			var ab AuthorBriefJSON
+			if err := json.Unmarshal([]byte(abResp), &ab); err != nil {
+				state.AuthorBrief = AuthorBriefJSON{}
+				return state, nil
+			}
+			state.AuthorBrief = ab
+			return state, nil
+		},
+	)
+
+	g.AddNode("literature_review", "Broad web search + synthesized overview and key resources",
+		func(ctx context.Context, state BlogComposingGraphState) (BlogComposingGraphState, error) {
+			qSchema := jsonschema.Reflect(&SearchQueriesJSON{})
+			qSchemaBytes, err := json.MarshalIndent(qSchema, "", "  ")
+			if err != nil {
+				return state, err
+			}
+			qPt := prompts.NewPromptTemplate(`
+The author will write a technical blog post. Plan 3-4 web search queries (for any search
+provider) that give a wide overview of the topic (official docs, GitHub, announcements,
+comparisons, setup guides).
+Queries should complement each other, not repeat the same phrasing. Bias queries toward the
+AUTHOR BRIEF — avoid centering the query plan on topics listed under out_of_scope or
+do_not_emphasize unless the brief explicitly asks for them.
+
+Rough draft:
+{{.draft}}
+
+AUTHOR BRIEF:
+{{.author_brief}}
+
+Return JSON only, matching this schema:
+{{.schema}}
+`, []string{"draft", "author_brief", "schema"})
+			qPrompt, err := qPt.Format(map[string]any{
+				"draft":        state.Draft,
+				"author_brief": authorBriefForPrompt(state.AuthorBrief),
+				"schema":       string(qSchemaBytes),
 			})
 			if err != nil {
 				return state, err
@@ -111,9 +164,9 @@ Return JSON only, matching this schema:
 			queries := normalizeLiteratureQueries(sq.Queries, state.Draft)
 			var bundles []string
 			for _, q := range queries {
-				raw, err := bochaSearch.Call(ctx, q)
+				raw, err := webSearch.Call(ctx, q)
 				if err != nil {
-					return state, fmt.Errorf("literature bocha search %q: %w", q, err)
+					return state, fmt.Errorf("literature web search %q: %w", q, err)
 				}
 				bundles = append(bundles, fmt.Sprintf("### Query: %s\n%s", q, truncateRunes(raw, 7000)))
 			}
@@ -131,10 +184,17 @@ Return JSON only, matching this schema:
 You are doing a short literature review for a technical blog. Using ONLY the WEB SEARCH
 RESULTS below (do not invent URLs; every key_resources.url must appear verbatim in the results):
 
-1) Write "overview": 2–4 tight paragraphs on what the landscape looks like, main tools/concepts,
-   and what a reader would need to know before a how-to article.
-2) Fill "key_resources" with 6–14 items: title and url copied from the results, plus an optional
-   short "note" on why it matters.
+The AUTHOR BRIEF reflects the author's draft and OVERRIDES the tone of search snippets when they
+stress paths the author marked out_of_scope or do_not_emphasize. Summarize the landscape in a way
+that supports the brief — do not reframe the post around topics the brief excludes.
+
+1) Write "overview": 2-4 tight paragraphs: tools/concepts a reader needs *given the author brief*,
+   not a generic survey of whatever search hits emphasize.
+2) Fill "key_resources" with 6-14 items: title and url copied from the results, plus an optional
+   short "note" on why it matters *to this brief*.
+
+AUTHOR BRIEF:
+{{.author_brief}}
 
 --- WEB SEARCH RESULTS ---
 {{.search}}
@@ -142,10 +202,11 @@ RESULTS below (do not invent URLs; every key_resources.url must appear verbatim 
 
 Return JSON only, matching this schema:
 {{.schema}}
-`, []string{"search", "schema"})
+`, []string{"author_brief", "search", "schema"})
 			litPrompt, err := litPt.Format(map[string]any{
-				"search": combined,
-				"schema": string(litSchemaBytes),
+				"author_brief": authorBriefForPrompt(state.AuthorBrief),
+				"search":       combined,
+				"schema":       string(litSchemaBytes),
 			})
 			if err != nil {
 				return state, err
@@ -172,23 +233,39 @@ Return JSON only, matching this schema:
 			}
 			pt := prompts.NewPromptTemplate(`
 You are an editorial planner. Turn the author's rough draft into a concise outline.
-Use the preliminary literature review to strengthen structure (fill gaps, order sections
-logically, reflect what primary sources emphasize). If the review conflicts with the draft,
-prefer being faithful to the draft's intent while aligning section titles with real-world terminology.
+
+The AUTHOR BRIEF is binding (extracted from the same draft). Use the literature review only
+where it supports that brief.
+
+Hard rules:
+- Do NOT add section titles whose primary job is an out-of_scope or do_not_emphasize narrative from the brief.
+- Every item under must_include in the brief must be plannable in the outline (dedicated step or clearly woven
+  into a named section).
+- If the author specified a preferred exact command, message, or one-liner, the outline must allow a section
+  where that appears prominently — not only generic “alternative” procedures unless the draft also asks for them.
+
+Depth and shape (unless the draft explicitly demands a very short post):
+- Aim for roughly 5–9 sections so the article can introduce, explain context, walk through setup, and cover pitfalls.
+- The first section must be a real introduction (problem, audience, what “success” looks like, and a roadmap of later sections),
+  not only a shallow TL;DR before jump-cutting to commands.
 
 Rough draft:
 {{.draft}}
+
+AUTHOR BRIEF:
+{{.author_brief}}
 
 Preliminary literature review (from web search):
 {{.literature}}
 
 Return JSON matching this schema:
 {{.schema}}
-`, []string{"draft", "literature", "schema"})
+`, []string{"draft", "author_brief", "literature", "schema"})
 			prompt, err := pt.Format(map[string]any{
-				"draft":      state.Draft,
-				"literature": truncateRunes(state.LiteratureReview, 12000),
-				"schema":     string(schemaBytes),
+				"draft":        state.Draft,
+				"author_brief": authorBriefForPrompt(state.AuthorBrief),
+				"literature":   truncateRunes(state.LiteratureReview, 12000),
+				"schema":       string(schemaBytes),
 			})
 			if err != nil {
 				return state, err
@@ -222,13 +299,20 @@ Return JSON matching this schema:
 			rsPt := prompts.NewPromptTemplate(`
 You shape the TOP of a technical blog for readers who may only skim.
 
-Use ONLY the material below (draft + literature excerpt + outline). Do not invent facts.
+Use ONLY the material below (author brief + draft + literature excerpt + outline). Do not invent facts.
+The AUTHOR BRIEF wins over search-heavy tangents: must_know_bullets must reflect in_scope and must_include,
+not generic checklists for topics the brief lists under out_of_scope or do_not_emphasize unless the draft explicitly needs them.
+
 Leave not_for_or_risks empty and common_pitfalls empty unless clearly supported.
 
 snapshot_h2 MUST be exactly one of: At a glance, Read this first, Bottom line, What matters (pick the best fit).
 
-must_know_bullets: 3–5 items; each one line; factual or actionable; no rhetorical questions.
-one_line_verdict: one concrete sentence — the article's main claim or recommendation.
+must_know_bullets: 3-5 items; each one line; factual or actionable; include verbatim must_include items when present in the brief.
+  These bullets are skim aids only; they must NOT replace a full introductory section later (problem framing + resource digest + roadmap).
+one_line_verdict: one concrete sentence — aligned with primary_goal in the brief.
+
+AUTHOR BRIEF:
+{{.author_brief}}
 
 Rough draft:
 {{.draft}}
@@ -243,8 +327,9 @@ Section titles (in order): {{.section_titles}}
 
 Return JSON only, matching this schema:
 {{.schema}}
-`, []string{"draft", "literature", "title", "thesis", "audience", "section_titles", "schema"})
+`, []string{"author_brief", "draft", "literature", "title", "thesis", "audience", "section_titles", "schema"})
 			rsPrompt, err := rsPt.Format(map[string]any{
+				"author_brief":   authorBriefForPrompt(state.AuthorBrief),
 				"draft":          state.Draft,
 				"literature":     truncateRunes(state.LiteratureReview, 10000),
 				"title":          state.Outline.Title,
@@ -269,12 +354,19 @@ Return JSON only, matching this schema:
 			fbPt := prompts.NewPromptTemplate(`
 Write ONLY markdown for the top of a technical blog (skim-first). No preamble.
 
+Follow the AUTHOR BRIEF: bullets must include concrete must_include items when relevant (verbatim
+strings from the draft). Do not headline topics the brief places under out_of_scope or do_not_emphasize unless
+the draft explicitly requires a short aside there.
+
 Rules:
 - First line: ## then exactly one of: At a glance, Read this first, Bottom line, What matters.
 - Next: one short paragraph — the single most important verdict (concrete, no cliché openers).
-- Then: a bullet list of 3–5 must-know points.
+- Then: a bullet list of 3-5 must-know points (skim aids; the first body section must still deliver a full intro).
 - Optional: one line on who this is NOT for, only if grounded in the text; otherwise omit.
 Do not use filler such as "In today's rapidly changing world" or "In conclusion," as empty throat-clearing. Do not label bullets "TL;DR".
+
+AUTHOR BRIEF:
+{{.author_brief}}
 
 Rough draft:
 {{.draft}}
@@ -286,8 +378,9 @@ Section titles: {{.section_titles}}
 
 Literature excerpt:
 {{.literature}}
-`, []string{"draft", "title", "thesis", "audience", "section_titles", "literature"})
+`, []string{"author_brief", "draft", "title", "thesis", "audience", "section_titles", "literature"})
 			fbPrompt, err := fbPt.Format(map[string]any{
+				"author_brief":   authorBriefForPrompt(state.AuthorBrief),
 				"draft":          state.Draft,
 				"title":          state.Outline.Title,
 				"thesis":         state.Outline.Thesis,
@@ -327,7 +420,7 @@ Literature excerpt:
 		},
 	)
 
-	g.AddNode("retrieve_evidence_for_section", "Plan Bocha web searches, run them, synthesize evidence bullets",
+	g.AddNode("retrieve_evidence_for_section", "Plan web searches, run them, synthesize evidence bullets",
 		func(ctx context.Context, state BlogComposingGraphState) (BlogComposingGraphState, error) {
 			if state.CurrentIndex < 0 || state.CurrentIndex >= len(state.Sections) {
 				return state, fmt.Errorf("invalid CurrentIndex %d for %d sections", state.CurrentIndex, len(state.Sections))
@@ -342,27 +435,30 @@ Literature excerpt:
 			qPt := prompts.NewPromptTemplate(`
 You plan web searches for ONE section of a technical blog post.
 
-Use the article title, thesis, draft notes, and section heading to infer the real topic,
-products, and jargon. Produce 2–3 distinct queries that surface current, factual material
-(docs, GitHub, release notes, setup guides) for THIS section only. Prefer specific names
-from the draft/title. Do not invent URLs.
+Use the article title, thesis, draft notes, section heading, and AUTHOR BRIEF. Produce 2-3 distinct
+queries for THIS section only. Do not craft queries whose main payoff is material the AUTHOR BRIEF lists under
+out_of_scope or do_not_emphasize unless this section’s heading clearly requires it per the draft.
 
 Blog working title: {{.title}}
 Thesis: {{.thesis}}
 Full draft notes: {{.draft}}
 Section heading: {{.section_title}}
 
+AUTHOR BRIEF:
+{{.author_brief}}
+
 Literature review (context; do not duplicate whole-article searches unless this section needs it):
 {{.literature_review}}
 
 Return JSON only, matching this schema:
 {{.schema}}
-`, []string{"title", "thesis", "draft", "section_title", "literature_review", "schema"})
+`, []string{"title", "thesis", "draft", "section_title", "author_brief", "literature_review", "schema"})
 			qPrompt, err := qPt.Format(map[string]any{
 				"title":             state.Outline.Title,
 				"thesis":            state.Outline.Thesis,
 				"draft":             state.Draft,
 				"section_title":     sec.Title,
+				"author_brief":      authorBriefForPrompt(state.AuthorBrief),
 				"literature_review": truncateRunes(state.LiteratureReview, 4000),
 				"schema":            string(schemaBytes),
 			})
@@ -380,12 +476,12 @@ Return JSON only, matching this schema:
 			queries := normalizeSearchQueries(sq.Queries, state.Outline.Title, sec.Title)
 			var searchBundles []string
 			for _, q := range queries {
-				raw, err := bochaSearch.Call(ctx, q)
+				raw, err := webSearch.Call(ctx, q)
 				if err != nil {
-					return state, fmt.Errorf("bocha search %q: %w", q, err)
+					return state, fmt.Errorf("web search %q: %w", q, err)
 				}
 				searchBundles = append(searchBundles,
-					fmt.Sprintf("### Query: %s\n%s", q, truncateRunes(raw, 6000)))
+					fmt.Sprintf("### Query: %s\n%s", q, truncateRunes(raw, 9000)))
 			}
 			combined := strings.Join(searchBundles, "\n\n")
 			if combined == "" {
@@ -393,12 +489,21 @@ Return JSON only, matching this schema:
 			}
 
 			synthPt := prompts.NewPromptTemplate(`
-You are a research assistant. From the WEB SEARCH RESULTS below, extract 3–8 concise
-evidence bullets for the blog section. Each bullet must be a paraphrased fact or
-actionable point grounded in the snippets. When a relevant page URL appears in the results,
-end the bullet with a markdown link using that exact URL, e.g. "…see [docs](https://exact/url/from/results)."
-Use a short, human anchor (not raw URLs as link text). At most one markdown link per bullet.
+You are a research assistant. From the WEB SEARCH RESULTS below, produce 4–10 evidence bullets for THIS section.
+
+Each bullet must be 2–4 sentences (not one-liners): (1) the fact or takeaway grounded in the snippets,
+(2) a short "digest" of what that source page is useful for — what a reader learns, which steps or concepts it covers,
+(3) when a relevant URL exists in the results, end with ONE markdown link using that exact URL:
+"... [short label](https://exact/url/from/results)."
+Use a short, human anchor for the link (not the raw URL as link text). At most one markdown link per bullet.
 If something is uncertain in the results, say so briefly. Do not invent URLs. Ignore irrelevant hits.
+
+AUTHOR BRIEF (binding): Deprioritize or omit bullets that mainly support do_not_emphasize / out_of_scope
+topics when they would steer the section away from the author's draft. Prefer evidence aligned with
+in_scope and must_include.
+
+AUTHOR BRIEF:
+{{.author_brief}}
 
 Section: {{.section_title}}
 Article thesis: {{.thesis}}
@@ -408,8 +513,9 @@ Article thesis: {{.thesis}}
 --- END ---
 
 Output plain text only: one bullet per line starting with "- ".
-`, []string{"section_title", "thesis", "search"})
+`, []string{"author_brief", "section_title", "thesis", "search"})
 			synthPrompt, err := synthPt.Format(map[string]any{
+				"author_brief":  authorBriefForPrompt(state.AuthorBrief),
 				"section_title": sec.Title,
 				"thesis":        state.Outline.Thesis,
 				"search":        combined,
@@ -436,8 +542,27 @@ Output plain text only: one bullet per line starting with "- ".
 			if evidenceBlock != "" {
 				evidenceBlock = "- " + evidenceBlock
 			}
+
+			sectionRole := sectionRoleInstructions(state.CurrentIndex == 0)
+
 			pt := prompts.NewPromptTemplate(`
 Write ONE section of a blog post in Markdown.
+
+{{.section_role}}
+
+AUTHOR BRIEF (binding — wins over evidence when they conflict):
+- Honor in_scope; do not build the section around out_of_scope or do_not_emphasize topics.
+- Every string listed under must_include must appear verbatim somewhere in the FINAL whole article.
+  For THIS section: when the section title and draft imply setup, installation, first-run, or copy-paste steps,
+  weave the relevant must_include items here (exact commands, URLs, or messages from the draft).
+- If the draft states a preferred procedure, present it first in the matching section before optional alternatives
+  the draft did not request.
+
+AUTHOR BRIEF:
+{{.author_brief}}
+
+Original rough draft (full context; do not contradict):
+{{.draft}}
 
 Article title: {{.title}}
 Thesis: {{.thesis}}
@@ -446,28 +571,33 @@ Section heading to use as ## {{.section_title}}
 Background from literature review (optional context):
 {{.literature_review}}
 
-Evidence bullets from web research; each may contain markdown links — reuse those exact
-URLs in prose where relevant (inline [text](url)); never invent links:
+Evidence bullets from web research (each may summarize a source + link). Reuse exact URLs in prose as
+inline [text](url); never invent links. When you cite a resource, include a brief knowledge digest:
+what the reader gets from that page (steps, definitions, or perspective) — grounded only in the evidence/literature.
 {{.evidence}}
 
 Structure and voice:
+- After the ## heading, write a substantive body. Do not compress into a single short paragraph per section.
 - Start the body with EXACTLY ONE opening sentence (no label prefix like "Takeaway:", "Summary:", "Conclusion:").
   That sentence must stand alone as this section's verdict if the reader reads nothing else.
   Across sections in one article, VARY how you open: sometimes a blunt claim, sometimes a short contrast,
   sometimes a concrete scenario — do not reuse the same rhythm every time.
-- Then 1–3 more short paragraphs: support, steps, nuance. Prefer short sentences, concrete nouns, and
-  light lists where they reduce cognitive load.
+- Follow with enough paragraphs to meet the length target in SECTION ROLE; weave steps, tradeoffs, and digests
+  of linked material — not bare link lists.
+- Prefer short sentences, concrete nouns, and light lists where they reduce cognitive load.
 - Avoid filler and stock phrases ("in today's world", "it is worth noting", "in conclusion," "indispensable", or vague hype).
-- Use the heading once as ## line; stay appropriate for audience: {{.audience}}.
-- Cite helpful resources in the prose (not only at the end) when evidence bullets provide URLs.
+- Stay appropriate for audience: {{.audience}}.
 
 Output only the section (heading + body), no preamble.
-`, []string{"title", "thesis", "section_title", "literature_review", "evidence", "audience"})
+`, []string{"section_role", "author_brief", "draft", "title", "thesis", "section_title", "literature_review", "evidence", "audience"})
 			prompt, err := pt.Format(map[string]any{
+				"section_role":      sectionRole,
+				"author_brief":      authorBriefForPrompt(state.AuthorBrief),
+				"draft":             state.Draft,
 				"title":             state.Outline.Title,
 				"thesis":            state.Outline.Thesis,
 				"section_title":     sec.Title,
-				"literature_review": truncateRunes(state.LiteratureReview, 3500),
+				"literature_review": truncateRunes(state.LiteratureReview, 8000),
 				"evidence":          evidenceBlock,
 				"audience":          state.Outline.Audience,
 			})
@@ -524,12 +654,32 @@ Output only the section (heading + body), no preamble.
 			pt := prompts.NewPromptTemplate(`
 You are a senior editor. Polish the following blog post for publication.
 
+The ORIGINAL DRAFT and AUTHOR BRIEF are the source of truth for scope.
+
 Goals:
+- Remove or demote dominant sections that violate the AUTHOR BRIEF (out_of_scope / do_not_emphasize narratives).
+  If stray web-search material conflicts with in_scope, cut or demote it unless the original draft explicitly
+  needed a brief mention; at most one short aside — otherwise delete.
+- Ensure every item under must_include in the brief appears verbatim in the final article. If any are missing,
+  add a tight paragraph in the correct section without inventing new requirements beyond the draft.
+- Length and depth: for a tutorial-style post like this, target roughly **1,800–3,500 words** total unless the
+  draft explicitly requires brevity. If the piece is thin mostly due to terseness (not lack of sources), **expand**
+  using only facts and digests already implied by the linked material and body — do not add new URLs or new products.
+- The **introduction** must read as a full section: problem, audience, conceptual framing, digest of what key linked
+  resources contain, and a roadmap. If the intro is only quick setup bullets, rewrite it into expository paragraphs
+  while keeping must_include verbatim.
+- Each substantive section should teach: when links appear, the reader should see what those pages are *for*, not only hrefs.
 - Remove fluff, throat-clearing, and redundant restatements (especially repeated thesis lines).
 - Keep skim-value: the opening snapshot block (if present) must NOT contradict the body; tighten snapshot
   bullets if the body refined the claim.
 - If two section openings use the same rhetorical pattern, rewrite one so the article feels less templated.
 - Prefer short sentences where it helps; keep concrete nouns and steps.
+
+AUTHOR BRIEF:
+{{.author_brief}}
+
+Original rough draft (for alignment):
+{{.draft}}
 
 CRITICAL: Preserve every markdown link [text](url) exactly (same URLs). You may reword
 link text slightly if grammar requires it, but do not drop sources or fabricate URLs.
@@ -542,8 +692,12 @@ Output only the final markdown.
 --- BEGIN ---
 {{.md}}
 --- END ---
-`, []string{"md"})
-			prompt, err := pt.Format(map[string]any{"md": state.AssembledMarkdown})
+`, []string{"author_brief", "draft", "md"})
+			prompt, err := pt.Format(map[string]any{
+				"author_brief": authorBriefForPrompt(state.AuthorBrief),
+				"draft":        state.Draft,
+				"md":           state.AssembledMarkdown,
+			})
 			if err != nil {
 				return state, err
 			}
@@ -575,6 +729,7 @@ Output only the final markdown.
 		},
 	)
 
+	g.AddEdge("author_brief", "literature_review")
 	g.AddEdge("literature_review", "build_outline")
 	g.AddEdge("build_outline", "reader_snapshot")
 	g.AddEdge("reader_snapshot", "split_into_sections")
@@ -584,7 +739,7 @@ Output only the final markdown.
 	g.AddEdge("final_editorial_pass", "save_document")
 	g.AddEdge("save_document", graph.END)
 
-	g.SetEntryPoint("literature_review")
+	g.SetEntryPoint("author_brief")
 
 	g.AddGlobalListener(&EventLogger{})
 	saveNode.AddListener(&SavedPathReporter{})
@@ -615,13 +770,16 @@ Output only the final markdown.
 // --- Graph state (typed, documents the full pipeline) ---
 
 // BlogComposingGraphState is the single source of truth for the composer graph.
-// Flow: literature_review → build_outline → reader_snapshot → split_into_sections →
+// Flow: author_brief → literature_review → build_outline → reader_snapshot → split_into_sections →
 //
 //	[retrieve_evidence_for_section → draft_section]* → assemble_document →
 //	final_editorial_pass → save_document
 type BlogComposingGraphState struct {
 	// Draft is the raw input from the author.
 	Draft string `json:"draft"`
+
+	// AuthorBrief is extracted from the draft only (binding constraints for all later nodes).
+	AuthorBrief AuthorBriefJSON `json:"author_brief,omitempty"`
 
 	// LiteratureReview is overview + key resources (markdown) from literature_review.
 	LiteratureReview string `json:"literature_review,omitempty"`
@@ -665,6 +823,47 @@ type SectionWork struct {
 	Draft    string   `json:"draft,omitempty"`
 }
 
+// AuthorBriefJSON is the LLM JSON shape for author_brief (draft-only extraction).
+type AuthorBriefJSON struct {
+	PrimaryGoal    string   `json:"primary_goal"`
+	InScope        []string `json:"in_scope"`
+	OutOfScope     []string `json:"out_of_scope"`
+	MustInclude    []string `json:"must_include"`
+	DoNotEmphasize []string `json:"do_not_emphasize"`
+}
+
+func authorBriefForPrompt(b AuthorBriefJSON) string {
+	if strings.TrimSpace(b.PrimaryGoal) == "" && len(b.InScope) == 0 && len(b.MustInclude) == 0 &&
+		len(b.OutOfScope) == 0 && len(b.DoNotEmphasize) == 0 {
+		return "(No author brief extracted — follow the rough draft literally.)"
+	}
+	var w strings.Builder
+	w.WriteString("primary_goal: ")
+	w.WriteString(strings.TrimSpace(b.PrimaryGoal))
+	w.WriteString("\n")
+	writeBullets := func(label string, xs []string) {
+		if len(xs) == 0 {
+			return
+		}
+		w.WriteString(label)
+		w.WriteString(":\n")
+		for _, s := range xs {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			w.WriteString("- ")
+			w.WriteString(s)
+			w.WriteString("\n")
+		}
+	}
+	writeBullets("in_scope", b.InScope)
+	writeBullets("out_of_scope", b.OutOfScope)
+	writeBullets("must_include (verbatim where quoted in draft)", b.MustInclude)
+	writeBullets("do_not_emphasize", b.DoNotEmphasize)
+	return strings.TrimSpace(w.String())
+}
+
 // OutlineJSON is the LLM JSON shape for build_outline.
 type OutlineJSON struct {
 	Title         string   `json:"title"`
@@ -673,7 +872,7 @@ type OutlineJSON struct {
 	SectionTitles []string `json:"section_titles"`
 }
 
-// SearchQueriesJSON is the LLM JSON shape for Bocha query planning.
+// SearchQueriesJSON is the LLM JSON shape for web search query planning.
 type SearchQueriesJSON struct {
 	Queries []string `json:"queries"`
 }
@@ -879,6 +1078,25 @@ func parseBulletLines(resp string) []string {
 		}
 	}
 	return bullets
+}
+
+func sectionRoleInstructions(isIntroduction bool) string {
+	if isIntroduction {
+		return `SECTION ROLE — OPENING / INTRODUCTION (first section of the article):
+- Target length: about 700–1,400 words in the body (after the ## heading) when the evidence and literature support it.
+- Write at least 5 meaty paragraphs (most paragraphs 4–7 sentences). Do not stop at a thin hook + roadmap.
+- Paragraphs 1–2: who this is for, the problem, and why driving Gemini in Chrome via OpenClaw matters (vs API-only or headless-only stories).
+- Next paragraphs: a **knowledge digest** of the most important external resources — for each major link you rely on from the evidence/literature,
+  spend a few sentences explaining what that page/documentation covers and what the reader gains (not just naming the link).
+- Include a clear **roadmap**: name the upcoming sections and what each will deliver (still prose, not a bare bullet list unless helpful).
+- You may use a short bullet list only where it truly aids skimming; the bulk must be expository paragraphs.
+- The skim block under the title (if any) is not a substitute for this full introduction.`
+	}
+	return `SECTION ROLE — BODY SECTION (not the article introduction):
+- Target length: about 450–900 words in the body after the ## heading for core/tutorial sections; 350–600 for short wrap-ups.
+- Write at least 4 substantive paragraphs unless this section is intentionally a brief checklist the outline marks as such.
+- Whenever you reference a URL from the evidence, add 1–3 sentences digesting what that resource explains or how it fits the workflow.
+- Prefer teaching and context over telegraphic step-only blurbs; ground claims in the evidence bullets.`
 }
 
 // --- Listeners ---
