@@ -7,6 +7,9 @@ import (
 )
 
 // NewGraph builds the blog composing graph with all nodes and edges wired.
+// Research URLs flow into the knowledge base; blueprint sections carry cite_urls;
+// section writing and final_edit prompts require inline [text](url) citations from that KB.
+// Prompts also enforce codeGroundingRules so fenced code in any language is KB-grounded, not fabricated.
 // The returned graph is ready for the caller to add listeners via
 // AddGlobalListener / AddNodeListener and then CompileListenable().
 func NewGraph(llm, llmStructured llms.Model, webSearch tools.Tool) *graph.ListenableStateGraph[State] {

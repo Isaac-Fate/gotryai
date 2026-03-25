@@ -72,3 +72,6 @@ testdata/
 
 # Output files
 /out 
+
+# Data files
+/data 

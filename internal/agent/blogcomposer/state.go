@@ -4,6 +4,7 @@ package blogcomposer
 //
 // Pipeline: analyze_draft → research → design_blueprint → [write_rich_section]* →
 // assemble → voice_pass → final_edit → save
+// (research builds KB URLs; blueprint assigns cite_urls per section; writers + final_edit weave links.)
 type State struct {
 	Draft         string         `json:"draft"`
 	DraftMeta     DraftMeta      `json:"draft_meta,omitempty"`
@@ -46,6 +47,8 @@ type SectionSpec struct {
 	Purpose     string   `json:"purpose"`
 	Artifacts   []string `json:"artifacts,omitempty"`
 	SearchHints []string `json:"search_hints,omitempty"`
+	// CiteURLs are URLs copied from the knowledge base; writers must weave them as inline [text](url).
+	CiteURLs []string `json:"cite_urls,omitempty"`
 }
 
 // SectionDraft is the rendered markdown for one section.

@@ -31,7 +31,7 @@ func analyzeDraftNode(llmStructured llms.Model) func(context.Context, State) (St
 		if err != nil {
 			return state, err
 		}
-		resp, err := llmStructured.Call(ctx, prompt)
+		resp, err := llms.GenerateFromSinglePrompt(ctx, llmStructured, prompt)
 		if err != nil {
 			return state, err
 		}
@@ -46,7 +46,10 @@ func analyzeDraftNode(llmStructured llms.Model) func(context.Context, State) (St
 	}
 }
 
-func researchNode(llm, llmStructured llms.Model, webSearch tools.Tool) func(context.Context, State) (State, error) {
+func researchNode(
+	llm, llmStructured llms.Model,
+	webSearch tools.Tool,
+) func(context.Context, State) (State, error) {
 	return func(ctx context.Context, state State) (State, error) {
 		qSchema := jsonschema.Reflect(&searchQueriesJSON{})
 		qSchemaBytes, _ := json.MarshalIndent(qSchema, "", "  ")
@@ -63,9 +66,9 @@ func researchNode(llm, llmStructured llms.Model, webSearch tools.Tool) func(cont
 		if err != nil {
 			return state, err
 		}
-		qResp, err := llmStructured.Call(ctx, qPrompt)
+		qResp, err := llms.GenerateFromSinglePrompt(ctx, llmStructured, qPrompt)
 		if err != nil {
-			return state, err
+			return state, fmt.Errorf("research queries: %w", err)
 		}
 		var sq searchQueriesJSON
 		if err := json.Unmarshal([]byte(qResp), &sq); err != nil {
@@ -131,8 +134,18 @@ func designBlueprintNode(llmStructured llms.Model) func(context.Context, State) 
 			}
 		}
 
-		pt := prompts.NewPromptTemplate(promptDesignBlueprint,
-			[]string{"draft", "post_type", "audience", "core_claim", "knowledge_base", "must_include_block", "schema"})
+		pt := prompts.NewPromptTemplate(
+			promptDesignBlueprint,
+			[]string{
+				"draft",
+				"post_type",
+				"audience",
+				"core_claim",
+				"knowledge_base",
+				"must_include_block",
+				"schema",
+			},
+		)
 		prompt, err := pt.Format(map[string]any{
 			"draft":              body,
 			"post_type":          state.DraftMeta.PostType,
@@ -145,7 +158,7 @@ func designBlueprintNode(llmStructured llms.Model) func(context.Context, State) 
 		if err != nil {
 			return state, err
 		}
-		resp, err := llmStructured.Call(ctx, prompt)
+		resp, err := llms.GenerateFromSinglePrompt(ctx, llmStructured, prompt)
 		if err != nil {
 			return state, err
 		}
@@ -190,14 +203,18 @@ func writeRichSectionNode(llm llms.Model) func(context.Context, State) (State, e
 
 		prompt := buildSectionPrompt(spec, state.Blueprint, kb, prior, voice, body)
 
-		resp, err := llm.Call(ctx, prompt)
+		resp, err := llms.GenerateFromSinglePrompt(ctx, llm, prompt)
 		if err != nil {
 			return state, err
 		}
 
 		md := strings.TrimSpace(resp)
 		if md == "" {
-			fmt.Fprintf(os.Stderr, "warning: write_rich_section produced empty markdown for %q\n", spec.Title)
+			fmt.Fprintf(
+				os.Stderr,
+				"warning: write_rich_section produced empty markdown for %q\n",
+				spec.Title,
+			)
 		}
 
 		state.Sections = append(state.Sections, SectionDraft{
@@ -244,7 +261,7 @@ func voicePassNode(llm llms.Model) func(context.Context, State) (State, error) {
 		if err != nil {
 			return state, err
 		}
-		resp, err := llm.Call(ctx, prompt)
+		resp, err := llms.GenerateFromSinglePrompt(ctx, llm, prompt)
 		if err != nil {
 			return state, err
 		}
@@ -255,14 +272,21 @@ func voicePassNode(llm llms.Model) func(context.Context, State) (State, error) {
 
 func finalEditNode(llm llms.Model) func(context.Context, State) (State, error) {
 	return func(ctx context.Context, state State) (State, error) {
-		pt := prompts.NewPromptTemplate(promptFinalEdit, []string{"post"})
+		pt := prompts.NewPromptTemplate(promptFinalEdit, []string{"post", "knowledge_base"})
+		kb := strings.TrimSpace(state.KnowledgeBase)
+		if kb == "" {
+			kb = "(no knowledge base — preserve existing links only; do not invent URLs)"
+		} else {
+			kb = truncateRunes(kb, 12000)
+		}
 		prompt, err := pt.Format(map[string]any{
-			"post": state.FinalPost,
+			"post":           state.FinalPost,
+			"knowledge_base": kb,
 		})
 		if err != nil {
 			return state, err
 		}
-		resp, err := llm.Call(ctx, prompt)
+		resp, err := llms.GenerateFromSinglePrompt(ctx, llm, prompt)
 		if err != nil {
 			return state, err
 		}

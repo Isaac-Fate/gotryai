@@ -30,6 +30,7 @@ Rough notes: it is this package smallnest/langgraphgo; basic examples of making 
 		panic(err)
 	}
 
+	// DeepSeek (commented — switch back by restoring these blocks and removing OpenRouter below)
 	llm, err := openai.New(
 		openai.WithBaseURL("https://api.deepseek.com"),
 		openai.WithToken(os.Getenv("DEEPSEEK_API_KEY")),
@@ -38,7 +39,6 @@ Rough notes: it is this package smallnest/langgraphgo; basic examples of making 
 	if err != nil {
 		panic(err)
 	}
-
 	llmStructured, err := openai.New(
 		openai.WithBaseURL("https://api.deepseek.com"),
 		openai.WithToken(os.Getenv("DEEPSEEK_API_KEY")),
@@ -48,6 +48,25 @@ Rough notes: it is this package smallnest/langgraphgo; basic examples of making 
 	if err != nil {
 		panic(err)
 	}
+
+	// llm, err := openai.New(
+	// 	openai.WithBaseURL("https://openrouter.ai/api/v1"),
+	// 	openai.WithToken(os.Getenv("OPENROUTER_API_KEY")),
+	// 	openai.WithModel("openai/gpt-4o-mini"),
+	// )
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	// llmStructured, err := openai.New(
+	// 	openai.WithBaseURL("https://openrouter.ai/api/v1"),
+	// 	openai.WithToken(os.Getenv("OPENROUTER_API_KEY")),
+	// 	openai.WithModel("openai/gpt-4o-mini"),
+	// 	openai.WithResponseFormat(openai.ResponseFormatJSON),
+	// )
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	g := blogcomposer.NewGraph(llm, llmStructured, webSearch)
 	g.AddGlobalListener(&nodeLogger{})
