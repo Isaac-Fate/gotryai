@@ -22,16 +22,26 @@ func main() {
 
 	// Sample draft input — replace or wire to stdin/flag in a real app.
 	draft := `
-Title idea: Using Gemini on the web in Chrome with OpenClaw
+Title idea: Let OpenClaw drive the Gemini web UI in your browser
 
-Rough notes: Technical walkthrough for readers who run OpenClaw (or are
-evaluating it) and want the model/browser path to be Google Gemini inside Chrome
-rather than a headless or alternate stack. Cover why you might want in-browser
-Gemini (accounts, extensions, live web UI), how configuration or tool routing
-typically works at a high level, and practical pitfalls (auth, rate limits,
-keeping Chrome in the loop). Audience: developers automating browsers or agent
-runtimes. Tone: hands-on engineering, accurate names and steps — use web search
-when specifics or versions are uncertain.
+Audience / prerequisites: Readers who already have OpenClaw installed and running
+locally on their machine — this post is not a from-zero OpenClaw setup guide.
+
+Goal: Configure things so OpenClaw itself can operate the browser and interact with
+Google Gemini’s normal web UI (the live page), instead of only talking to APIs or a
+disconnected headless stack.
+
+How to get there (must mention): You can install the relevant capability from Claw
+Hub — specifically the Gemini browser skill pack at
+https://clawhub.ai/eccstartup/gemini-browser — and wire it into your OpenClaw setup.
+
+Rough notes to cover: What changes once the skill is installed (tools, prompts, or
+browser session expectations), how to sanity-check that Gemini in the tab is what
+OpenClaw is steering, and practical pitfalls (Google account / session in the browser,
+extensions, rate limits, keeping the right Chrome profile or window in the loop).
+
+Tone: hands-on engineering; accurate names and URLs — use web search when versions
+or UI labels are uncertain.
 `
 
 	bochaSearch, err := tool.NewBochaSearch(
