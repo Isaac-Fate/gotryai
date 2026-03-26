@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -21,11 +22,33 @@ import (
 func main() {
 	godotenv.Load()
 
-	draft := strings.TrimSpace(`
-Title idea: try langgraphgo
+	draftFile := flag.String("file", "", "read draft from this file (optional; if set, positional draft args are ignored)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-file path] [draft text...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  Provide the blog draft as positional arguments, or pass a file with -file.\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
 
-Rough notes: it is this package smallnest/langgraphgo; basic examples of making an AI agent app, invoke agent, structured output, workflow graph, agent, etc.
-`)
+	var draft string
+	if p := strings.TrimSpace(*draftFile); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read draft file: %v\n", err)
+			os.Exit(1)
+		}
+		draft = string(b)
+	} else if flag.NArg() > 0 {
+		draft = strings.Join(flag.Args(), " ")
+	} else {
+		flag.Usage()
+		os.Exit(1)
+	}
+	draft = strings.TrimSpace(draft)
+	if draft == "" {
+		fmt.Fprintln(os.Stderr, "draft is empty")
+		os.Exit(1)
+	}
 
 	webSearch, err := mytool.NewDuckDuckGoSearch(
 		mytool.WithDuckCount(8),
@@ -58,25 +81,6 @@ Rough notes: it is this package smallnest/langgraphgo; basic examples of making 
 	if err != nil {
 		panic(err)
 	}
-
-	// llm, err := openai.New(
-	// 	openai.WithBaseURL("https://openrouter.ai/api/v1"),
-	// 	openai.WithToken(os.Getenv("OPENROUTER_API_KEY")),
-	// 	openai.WithModel("openai/gpt-4o-mini"),
-	// )
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	// llmStructured, err := openai.New(
-	// 	openai.WithBaseURL("https://openrouter.ai/api/v1"),
-	// 	openai.WithToken(os.Getenv("OPENROUTER_API_KEY")),
-	// 	openai.WithModel("openai/gpt-4o-mini"),
-	// 	openai.WithResponseFormat(openai.ResponseFormatJSON),
-	// )
-	// if err != nil {
-	// 	panic(err)
-	// }
 
 	graphOpts := []blogcomposer.Option{
 		blogcomposer.WithUpfrontResearch(true),
