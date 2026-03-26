@@ -8,9 +8,38 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 	"github.com/PuerkitoBio/goquery"
 )
+
+var (
+	htmlSnippetConverter     *converter.Converter
+	htmlSnippetConverterOnce sync.Once
+)
+
+func snippetHTMLToMarkdown(snippetHTML string) string {
+	snippetHTML = strings.TrimSpace(snippetHTML)
+	if snippetHTML == "" {
+		return ""
+	}
+	htmlSnippetConverterOnce.Do(func() {
+		htmlSnippetConverter = converter.NewConverter(
+			converter.WithPlugins(
+				base.NewBasePlugin(),
+				commonmark.NewCommonmarkPlugin(),
+			),
+		)
+	})
+	out, err := htmlSnippetConverter.ConvertString("<div>" + snippetHTML + "</div>")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
 
 // Browser-like UA reduces DuckDuckGo “anomaly” bot interstitials compared to Go’s default client string.
 const ddgChromeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -21,11 +50,22 @@ const ddgJSONAPIURL = "https://api.duckduckgo.com/"
 // DuckDuckGoSearch implements langchaingo/tools.Tool like langgraphgo’s BraveSearch and BochaSearch:
 // Name, Description, and Call(ctx, input string). No API key required.
 type DuckDuckGoSearch struct {
-	Count  int
-	Client *http.Client
+	Count int
+	// Markdown, when true, formats Call() output as Markdown: headings, [title](url) links,
+	// HTML snippets converted via html-to-markdown, and multi-line code-like snippets fenced
+	// so downstream tools can extract verbatim listings from search text.
+	Markdown bool
+	Client   *http.Client
 }
 
 type DuckOption func(*DuckDuckGoSearch)
+
+// WithDuckMarkdown selects Markdown output for Call() instead of the legacy plain-text layout.
+func WithDuckMarkdown(markdown bool) DuckOption {
+	return func(d *DuckDuckGoSearch) {
+		d.Markdown = markdown
+	}
+}
 
 // WithDuckCount limits how many items to include in the formatted result (1–20).
 func WithDuckCount(count int) DuckOption {
@@ -50,6 +90,8 @@ func WithDuckHTTPClient(c *http.Client) DuckOption {
 }
 
 // NewDuckDuckGoSearch builds a DuckDuckGo search tool with optional configuration.
+// Use WithDuckMarkdown(true) so Call returns Markdown (html snippets → markdown via html-to-markdown;
+// code-shaped snippets fenced). Default is legacy plain-text lines (“Title:… URL:…”).
 func NewDuckDuckGoSearch(opts ...DuckOption) (*DuckDuckGoSearch, error) {
 	d := &DuckDuckGoSearch{
 		Count:  10,
@@ -86,6 +128,108 @@ func (d *DuckDuckGoSearch) Call(ctx context.Context, input string) (string, erro
 	return d.searchJSON(ctx, q)
 }
 
+type ddgHit struct {
+	Title   string
+	URL     string
+	Snippet string
+}
+
+func escapeMDLinkText(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "[", "\\[")
+	s = strings.ReplaceAll(s, "]", "\\]")
+	return s
+}
+
+func looksLikeCodeSample(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 8 {
+		return false
+	}
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) == 1 {
+		t := strings.TrimSpace(lines[0])
+		if strings.HasPrefix(t, "go get ") || strings.HasPrefix(t, "go install ") ||
+			strings.HasPrefix(t, "curl ") || strings.HasPrefix(t, "wget ") {
+			return true
+		}
+	}
+	if len(lines) < 2 {
+		return false
+	}
+	prefixes := []string{
+		"package ", "import ", "func ", "type ", "var ", "const ", "struct ",
+		"#include", "def ", "class ", "fn ", "let ", "pub ", "use ",
+	}
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		for _, p := range prefixes {
+			if strings.HasPrefix(t, p) {
+				return true
+			}
+		}
+	}
+	if strings.Count(s, "{") >= 2 && strings.Count(s, "}") >= 2 {
+		return true
+	}
+	return false
+}
+
+func guessFenceLang(s string) string {
+	s = strings.TrimSpace(s)
+	switch {
+	case strings.Contains(s, "package ") || (strings.Contains(s, "func ") && strings.Contains(s, "{")):
+		return "go"
+	case strings.HasPrefix(strings.TrimSpace(s), "#include") || strings.Contains(s, "int main"):
+		return "c"
+	case strings.Contains(s, "def ") && strings.Contains(s, ":"):
+		return "python"
+	case strings.Contains(s, "=>") || strings.Contains(s, "function "):
+		return "javascript"
+	default:
+		return "text"
+	}
+}
+
+func maybeFenceSnippetBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" || strings.HasPrefix(body, "```") || strings.Contains(body, "\n```") {
+		return body
+	}
+	if looksLikeCodeSample(body) {
+		return "```" + guessFenceLang(body) + "\n" + body + "\n```"
+	}
+	return body
+}
+
+func formatHitsPlain(hits []ddgHit) string {
+	var sb strings.Builder
+	for i, h := range hits {
+		sb.WriteString(fmt.Sprintf("%d. Title: %s\nURL: %s\n", i+1, h.Title, h.URL))
+		if h.Snippet != "" {
+			sb.WriteString(fmt.Sprintf("Description: %s\n", h.Snippet))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+func formatHitsMarkdown(hits []ddgHit) string {
+	var sb strings.Builder
+	sb.WriteString("# DuckDuckGo search results\n\n")
+	for i, h := range hits {
+		sb.WriteString(fmt.Sprintf("## %d. [%s](%s)\n\n", i+1, escapeMDLinkText(h.Title), h.URL))
+		if h.Snippet != "" {
+			body := maybeFenceSnippetBody(h.Snippet)
+			sb.WriteString(body)
+			sb.WriteString("\n\n---\n\n")
+		} else {
+			sb.WriteString("---\n\n")
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
 func (d *DuckDuckGoSearch) searchHTML(ctx context.Context, query string) (string, bool) {
 	form := url.Values{}
 	form.Set("q", query)
@@ -118,10 +262,9 @@ func (d *DuckDuckGoSearch) searchHTML(ctx context.Context, query string) (string
 		return "", false
 	}
 
-	var sb strings.Builder
-	n := 0
+	var hits []ddgHit
 	doc.Find("div.web-result").Each(func(_ int, s *goquery.Selection) {
-		if n >= d.Count {
+		if len(hits) >= d.Count {
 			return
 		}
 		a := s.Find("a.result__a").First()
@@ -130,22 +273,34 @@ func (d *DuckDuckGoSearch) searchHTML(ctx context.Context, query string) (string
 		if title == "" || href == "" {
 			return
 		}
-		snippet := strings.TrimSpace(s.Find("a.result__snippet").Text())
-		if snippet == "" {
-			snippet = strings.TrimSpace(s.Find(".result__snippet").Text())
+		snip := s.Find("a.result__snippet").First()
+		if snip.Length() == 0 {
+			snip = s.Find(".result__snippet").First()
 		}
-		n++
-		sb.WriteString(fmt.Sprintf("%d. Title: %s\nURL: %s\n", n, title, href))
-		if snippet != "" {
-			sb.WriteString(fmt.Sprintf("Description: %s\n", snippet))
+		snippetText := strings.TrimSpace(snip.Text())
+		var snippet string
+		if d.Markdown {
+			if htmlFrag, _ := snip.Html(); htmlFrag != "" {
+				if conv := snippetHTMLToMarkdown(htmlFrag); conv != "" {
+					snippet = conv
+				}
+			}
+			if snippet == "" {
+				snippet = snippetText
+			}
+		} else {
+			snippet = snippetText
 		}
-		sb.WriteString("\n")
+		hits = append(hits, ddgHit{Title: title, URL: href, Snippet: snippet})
 	})
 
-	if sb.Len() == 0 {
+	if len(hits) == 0 {
 		return "", false
 	}
-	return sb.String(), true
+	if d.Markdown {
+		return formatHitsMarkdown(hits), true
+	}
+	return formatHitsPlain(hits), true
 }
 
 func (d *DuckDuckGoSearch) searchJSON(ctx context.Context, query string) (string, error) {
@@ -179,6 +334,10 @@ func (d *DuckDuckGoSearch) searchJSON(ctx context.Context, query string) (string
 	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("duckduckgo json decode: %w", err)
+	}
+
+	if d.Markdown {
+		return formatJSONResultMarkdown(result, d.Count), nil
 	}
 
 	var sb strings.Builder
@@ -230,6 +389,76 @@ func (d *DuckDuckGoSearch) searchJSON(ctx context.Context, query string) (string
 		return "No results found", nil
 	}
 	return sb.String(), nil
+}
+
+// formatJSONResultMarkdown renders the DuckDuckGo instant-answer JSON payload as Markdown.
+func formatJSONResultMarkdown(result map[string]any, maxTopics int) string {
+	var parts []string
+	header := "# DuckDuckGo (instant answer API)\n\n"
+
+	if t := strings.TrimSpace(toStr(result["AbstractText"])); t != "" {
+		u := strings.TrimSpace(toStr(result["AbstractURL"]))
+		sec := "## Summary\n\n"
+		if u != "" {
+			sec += fmt.Sprintf("Source: <%s>\n\n", u)
+		}
+		sec += maybeFenceSnippetBody(t)
+		parts = append(parts, sec)
+	}
+	if heading := strings.TrimSpace(toStr(result["Heading"])); heading != "" && len(parts) == 0 {
+		parts = append(parts, "## Heading\n\n"+heading)
+	}
+	if a := strings.TrimSpace(toStr(result["Answer"])); a != "" {
+		parts = append(parts, "## Answer\n\n"+maybeFenceSnippetBody(a))
+	}
+
+	if rt, ok := result["RelatedTopics"].([]any); ok {
+		lines := flattenRelatedTopics(rt, maxTopics)
+		if len(lines) > 0 {
+			var b strings.Builder
+			b.WriteString("## Related\n\n")
+			for _, line := range lines {
+				b.WriteString("- ")
+				b.WriteString(strings.ReplaceAll(line, "\n", " "))
+				b.WriteString("\n")
+			}
+			parts = append(parts, b.String())
+		}
+	}
+
+	if results, ok := result["Results"].([]any); ok {
+		idx := 0
+		for _, rly := range results {
+			if idx >= maxTopics {
+				break
+			}
+			m, ok := rly.(map[string]any)
+			if !ok {
+				continue
+			}
+			t := strings.TrimSpace(toStr(m["Text"]))
+			if t == "" {
+				t = strings.TrimSpace(toStr(m["Result"]))
+			}
+			u := strings.TrimSpace(toStr(m["FirstURL"]))
+			if t == "" {
+				continue
+			}
+			idx++
+			sec := fmt.Sprintf("## %d. ", idx)
+			if u != "" {
+				sec += fmt.Sprintf("[%s](%s)\n\n", escapeMDLinkText(t), u)
+			} else {
+				sec += t + "\n\n"
+			}
+			parts = append(parts, strings.TrimSpace(sec))
+		}
+	}
+
+	if len(parts) == 0 {
+		return "No results found"
+	}
+	return strings.TrimSpace(header + strings.Join(parts, "\n\n---\n\n"))
 }
 
 func toStr(v any) string {

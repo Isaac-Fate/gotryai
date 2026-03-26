@@ -7,45 +7,67 @@ import (
 )
 
 // NewGraph builds the blog composing graph with all nodes and edges wired.
-// Research URLs flow into the knowledge base; blueprint sections carry cite_urls;
-// section writing and final_edit prompts require inline [text](url) citations from that KB.
-// Prompts also enforce codeGroundingRules so fenced code in any language is KB-grounded, not fabricated.
-// The returned graph is ready for the caller to add listeners via
-// AddGlobalListener / AddNodeListener and then CompileListenable().
-func NewGraph(llm, llmStructured llms.Model, webSearch tools.Tool) *graph.ListenableStateGraph[State] {
+//
+// sectionExtraTools is appended after webSearch for the section agent (e.g. Fetch_Page_Text);
+// pass nil if none. Use opts to override defaults (see With* in options.go).
+//
+// Default flow: analyze_draft → design_blueprint → [draft_section]* → assemble_post → publish_polish → save.
+// With WithUpfrontResearch(true): analyze_draft → research → design_blueprint → prefetch_sources → draft_section → …
+//
+// The returned graph is ready for AddGlobalListener / AddNodeListener and CompileListenable().
+func NewGraph(
+	llm, llmStructured llms.Model,
+	webSearch tools.Tool,
+	sectionExtraTools []tools.Tool,
+	opts ...Option,
+) *graph.ListenableStateGraph[State] {
+	o := buildOptions(opts...)
+
+	var fetchTool tools.Tool
+	for _, t := range sectionExtraTools {
+		if t != nil && t.Name() == "Fetch_Page_Text" {
+			fetchTool = t
+			break
+		}
+	}
+	sectionTools := append([]tools.Tool{webSearch}, sectionExtraTools...)
 	g := graph.NewListenableStateGraph[State]()
 
 	g.AddNode("analyze_draft", "Parse draft hints + detect post type",
 		analyzeDraftNode(llmStructured))
 
-	g.AddNode("research", "Batch web search + synthesize knowledge base",
-		researchNode(llm, llmStructured, webSearch))
+	g.AddNode("design_blueprint", "Outline: sections, artifacts, cite_urls",
+		designBlueprintNode(llmStructured, o))
 
-	g.AddNode("design_blueprint", "Creative structure with section types + artifacts",
-		designBlueprintNode(llmStructured))
+	g.AddNode("draft_section", "One section via agent (search + optional fetch); append tool corpus",
+		writeRichSectionNode(llm, sectionTools, o))
 
-	g.AddNode("write_rich_section", "Draft one section with type-specific prompt",
-		writeRichSectionNode(llm))
-
-	g.AddNode("assemble", "Concatenate sections into full post",
+	g.AddNode("assemble_post", "Concatenate sections into full post",
 		assembleNode())
 
-	g.AddNode("voice_pass", "Inject personal voice and transitions",
-		voicePassNode(llm))
-
-	g.AddNode("final_edit", "Polish for publication",
-		finalEditNode(llm))
+	g.AddNode("publish_polish", "Single editorial pass: structure, citations, mermaid, light voice",
+		publishPolishNode(llm, o))
 
 	g.AddNode("save", "Persist final post to disk",
-		saveNode())
+		saveNode(o))
 
-	g.AddEdge("analyze_draft", "research")
-	g.AddEdge("research", "design_blueprint")
-	g.AddEdge("design_blueprint", "write_rich_section")
-	g.AddConditionalEdge("write_rich_section", sectionRouter)
-	g.AddEdge("assemble", "voice_pass")
-	g.AddEdge("voice_pass", "final_edit")
-	g.AddEdge("final_edit", "save")
+	if o.UpfrontResearch {
+		g.AddNode("research", "Batch web search + synthesize knowledge base",
+			researchNode(llm, llmStructured, webSearch, o))
+		g.AddNode("prefetch_sources", "Fetch GitHub file bodies from blueprint cite_urls (blob/raw only)",
+			prefetchBlueprintSourcesNode(fetchTool))
+		g.AddEdge("analyze_draft", "research")
+		g.AddEdge("research", "design_blueprint")
+		g.AddEdge("design_blueprint", "prefetch_sources")
+		g.AddEdge("prefetch_sources", "draft_section")
+	} else {
+		g.AddEdge("analyze_draft", "design_blueprint")
+		g.AddEdge("design_blueprint", "draft_section")
+	}
+
+	g.AddConditionalEdge("draft_section", sectionRouter)
+	g.AddEdge("assemble_post", "publish_polish")
+	g.AddEdge("publish_polish", "save")
 	g.AddEdge("save", graph.END)
 	g.SetEntryPoint("analyze_draft")
 

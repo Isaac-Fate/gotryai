@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"gotryai/internal/agent/blogcomposer"
-	mytool "gotryai/pkg/tool"
 
 	"github.com/joho/godotenv"
 	"github.com/smallnest/langgraphgo/graph"
 	"github.com/tmc/langchaingo/llms/openai"
+	"github.com/tmc/langchaingo/tools"
+
+	mytool "gotryai/pkg/tool"
 )
 
 func main() {
@@ -25,7 +27,15 @@ Title idea: try langgraphgo
 Rough notes: it is this package smallnest/langgraphgo; basic examples of making an AI agent app, invoke agent, structured output, workflow graph, agent, etc.
 `)
 
-	webSearch, err := mytool.NewDuckDuckGoSearch(mytool.WithDuckCount(8))
+	webSearch, err := mytool.NewDuckDuckGoSearch(
+		mytool.WithDuckCount(8),
+		mytool.WithDuckMarkdown(true),
+	)
+	// webSearch, err := tool.NewBochaSearch(os.Getenv("BOCHA_API_KEY"))
+	if err != nil {
+		panic(err)
+	}
+	fetchText, err := mytool.NewFetchPageText()
 	if err != nil {
 		panic(err)
 	}
@@ -68,7 +78,19 @@ Rough notes: it is this package smallnest/langgraphgo; basic examples of making 
 	// 	panic(err)
 	// }
 
-	g := blogcomposer.NewGraph(llm, llmStructured, webSearch)
+	graphOpts := []blogcomposer.Option{
+		blogcomposer.WithUpfrontResearch(true),
+	}
+	if p := strings.TrimSpace(os.Getenv("BLOG_COMPOSER_SQLITE_PATH")); p != "" {
+		secStore, err := blogcomposer.OpenSQLiteSectionDraftStore(p)
+		if err != nil {
+			panic(err)
+		}
+		defer blogcomposer.CloseSectionDraftStore(secStore)
+		graphOpts = append(graphOpts, blogcomposer.WithSectionDraftStore(secStore))
+	}
+
+	g := blogcomposer.NewGraph(llm, llmStructured, webSearch, []tools.Tool{fetchText}, graphOpts...)
 	g.AddGlobalListener(&nodeLogger{})
 
 	runnable, err := g.CompileListenable()
